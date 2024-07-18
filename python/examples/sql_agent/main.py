@@ -35,6 +35,7 @@ query_writer_agent = Agent(
     llm=llm,
     allow_delegation=True,
     tools=[],
+    cache=False,
 )
 
 # Define the Query Executor Agent
@@ -52,6 +53,7 @@ query_executor_agent = Agent(
     llm=llm,
     allow_delegation=False,
     tools=tools,
+    cache=False,
 )
 
 # Define the File Writer Agent
@@ -68,6 +70,7 @@ file_writer_agent = Agent(
     llm=llm,
     allow_delegation=False,
     tools=file_tool,
+    cache=False,
 )
 
 # User-provided description of the database and input query
@@ -89,6 +92,7 @@ execute_query_task = Task(
     expected_output="Results of the SQL query were returned. Stop once the goal is achieved",
     tools=tools,
     agent=query_executor_agent,
+    cache=False,
 )
 
 # Define the task for writing the executed SQL query to a log file
@@ -101,6 +105,7 @@ file_write_task = Task(
     tools=file_tool,
     agent=file_writer_agent,
     allow_delegation=False,
+    cache=False,
 )
 
 # Define the crew with the agents and tasks

@@ -9,6 +9,7 @@ import json
 import os
 import time
 import typing as t
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -37,16 +38,18 @@ from composio.tools.local.handler import LocalClient
 from composio.utils.enums import get_enum_key
 from composio.utils.logging import WithLogger
 from composio.utils.url import get_api_url_base
+from composio.utils.logging import get as get_logger
 
 
 output_dir = LOCAL_CACHE_DIRECTORY / LOCAL_OUTPUT_FILE_DIRECTORY_NAME
-
+logger = get_logger("ComposioToolSet")
 
 class ComposioToolSet(WithLogger):
     """Composio toolset."""
 
     _remote_client: t.Optional[Composio] = None
     _connected_accounts: t.Optional[t.List[ConnectedAccountModel]] = None
+    _run_start_timestamp: t.Optional[float] = None
 
     def __init__(
         self,
@@ -125,6 +128,11 @@ class ComposioToolSet(WithLogger):
     @property
     def runtime(self) -> t.Optional[str]:
         return self._runtime
+
+    @classmethod
+    def reset_run_timestamp(cls) -> None:
+        """Reset the run timestamp."""
+        cls._run_start_timestamp = None
 
     def check_connected_account(self, action: ActionType) -> None:
         """Check if connected account is required and if required it exists or not."""
@@ -246,31 +254,73 @@ class ComposioToolSet(WithLogger):
         text: t.Optional[str] = None,
         connected_account_id: t.Optional[str] = None,
     ) -> t.Dict:
-        """
-        Execute an action on a given entity.
+        action_start_time = time.time()
+        action_log = {
+            "action": str(action),
+            "params": params,
+            "start_time": action_start_time,
+            "end_time": None,
+            "duration": None,
+            "status": "started",
+            "error": None,
+        }
+        try:
+            action = Action(action)
+            if action.is_local:
+                result = self._execute_local(
+                    action=action,
+                    params=params,
+                    metadata=metadata,
+                )
+            else:
+                result = self._execute_remote(
+                    action=action,
+                    params=params,
+                    entity_id=entity_id,
+                    text=text,
+                    connected_account_id=connected_account_id,
+                )
+            action_log["status"] = "success"
+            action_log["response"] = result
+        except Exception as e:
+            action_log["status"] = "failure"
+            action_log["error"] = str(e)
+            raise
+        finally:
+            action_log["end_time"] = time.time()
+            action_log["duration"] = action_log["end_time"] - action_log["start_time"]
+            try:
+                self._log_action(action_log)
+            except Exception as e:
+                self.logger.error(f"Failed to log action: {action_log}. Error: {str(e)}")
+        return result
 
-        :param action: Action to execute
-        :param params: The parameters to pass to the action
-        :param entity_id: The ID of the entity to execute the action on. Defaults to "default"
-        :param text: Extra text to use for generating function calling metadata
-        :param metadata: Metadata for executing local action
-        :param connected_account_id: Connection ID for executing the remote action
-        :return: Output object from the function call
-        """
-        action = Action(action)
-        if action.is_local:
-            return self._execute_local(
-                action=action,
-                params=params,
-                metadata=metadata,
-            )
-        return self._execute_remote(
-            action=action,
-            params=params,
-            entity_id=entity_id,
-            text=text,
-            connected_account_id=connected_account_id,
-        )
+    def _log_action(self, action_log: dict):
+        log_dir_path = Path("action_logs")
+        log_dir_path.mkdir(parents=True, exist_ok=True)
+
+        if ComposioToolSet._run_start_timestamp is None:
+            ComposioToolSet._run_start_timestamp = action_log["start_time"]
+
+        log_file_path = log_dir_path / f"{ComposioToolSet._run_start_timestamp}.json"
+
+        try:
+            if log_file_path.exists():
+                with open(log_file_path, "r") as file:
+                    logs = json.load(file)
+            else:
+                logs = []
+
+            if action_log.get("response", {}).get("status") == "failure":
+                action_log["status"] = "tool_failure"
+                action_log["error"] = action_log["response"].get("details")
+
+            logs.append(action_log)
+
+            with open(log_file_path, "w") as file:
+                json.dump(logs, file, indent=4)
+        except Exception as e:
+            self.logger.error(f"Failed to write to log file: {log_file_path}. Error: {str(e)}")
 
     def get_action_schemas(
         self,
