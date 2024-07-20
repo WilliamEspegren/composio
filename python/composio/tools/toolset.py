@@ -10,6 +10,10 @@ import os
 import time
 import typing as t
 from pathlib import Path
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import plotly.express as px
+import pandas as pd
 
 from pydantic import BaseModel
 
@@ -50,6 +54,8 @@ class ComposioToolSet(WithLogger):
     _remote_client: t.Optional[Composio] = None
     _connected_accounts: t.Optional[t.List[ConnectedAccountModel]] = None
     _run_start_timestamp: t.Optional[float] = None
+    _logging_enabled: t.Optional[bool] = False
+    _server_active: t.Optional[bool] = False
 
     def __init__(
         self,
@@ -60,6 +66,7 @@ class ComposioToolSet(WithLogger):
         entity_id: str = DEFAULT_ENTITY_ID,
         workspace_env: ExecEnv = ExecEnv.HOST,
         workspace_id: t.Optional[str] = None,
+        action_logging: t.Optional[bool] = True,
     ) -> None:
         """
         Initialize composio toolset
@@ -73,6 +80,7 @@ class ComposioToolSet(WithLogger):
         :param workspace_env: Environment where actions should be executed,
             you can choose from `host`, `docker`, `flyio` and `e2b`.
         :param workspace_id: Workspace ID for loading an existing workspace
+        :param action_logging: Whether to log the actions or not
         """
         super().__init__()
         self.entity_id = entity_id
@@ -106,6 +114,50 @@ class ComposioToolSet(WithLogger):
 
         self._runtime = runtime
         self._local_client = LocalClient()
+
+        if action_logging and not ComposioToolSet._logging_enabled:
+            try:
+                import plotly.express as px
+                import pandas as pd
+            except ImportError:
+                self.logger.error(
+                    "Plotly and pandas are required for action logging. "
+                    "Please install them using `pip install plotly pandas`"
+                )
+                return
+            self.start_logging_server()
+
+    def start_logging_server(self):
+        if not ComposioToolSet._server_active:
+            server_thread = threading.Thread(target=self._run_server)
+            server_thread.start()
+
+    def _run_server(self):
+        self.logger.info("Action logging is enabled, visit http://localhost:8032 to view the logs")
+        server_address = ('', 8032)
+        httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+        ComposioToolSet._server_active = True
+        httpd.serve_forever()
+
+    def _load_logs(self, log_dir):
+        logs = []
+        for log_file in log_dir.glob("*.json"):
+            with open(log_file, "r") as file:
+                logs.extend(json.load(file))
+        return logs
+
+    def _prepare_data(self, logs):
+        data = []
+        for log in logs:
+            data.append({
+                "action": log["action"],
+                "start_time": log["start_time"],
+                "end_time": log["end_time"],
+                "duration": log["duration"],
+                "status": log["status"],
+                "error": log.get("error", None)
+            })
+        return pd.DataFrame(data)
 
     def set_workspace_id(self, workspace_id: str) -> None:
         self.workspace = WorkspaceFactory.get(id=workspace_id)
@@ -523,3 +575,21 @@ def _write_file(file_path: t.Union[str, os.PathLike], content: t.Union[str, byte
     else:
         with open(file_path, "wb") as file:
             file.write(content)
+
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            log_dir = Path("action_logs")
+            logs = ComposioToolSet()._load_logs(log_dir)
+            df = ComposioToolSet()._prepare_data(logs)
+            fig = px.bar(df, x="action", y="duration", color="status", barmode="group")
+            graph_html = fig.to_html(full_html=False)
+
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(graph_html.encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
